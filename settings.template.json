@@ -1,0 +1,20 @@
+{
+  "OutputPath": "sessions",
+  "Hotkeys": {
+    "StartStop": "F9",
+    "PauseSteps": "F10"
+  },
+  "Video": {
+    "Width": 1920,
+    "Height": 1080,
+    "Fps": 30
+  },
+  "Screenshots": {
+    "HighlightClicks": true,
+    "HighlightRadius": 20
+  },
+  "Encoder": {
+    "PreferHardware": true,
+    "FfmpegPath": "ffmpeg.exe"
+  }
+}

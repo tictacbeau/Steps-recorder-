@@ -1,0 +1,11 @@
+bin/
+obj/
+dist/
+sessions/
+.vs/
+*.user
+*.suo
+*.userprefs
+.idea/
+*.swp
+*~
