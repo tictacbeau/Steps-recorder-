@@ -1,0 +1,173 @@
+name: Build & Release
+
+on:
+  push:
+    branches: [main, master, "claude/**"]
+    tags:     ["v*"]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create a GitHub Release after building"
+        required: false
+        default: "false"
+        type: boolean
+
+env:
+  DOTNET_VERSION: "9.0.x"
+  BUILD_CONFIG:   "Release"
+  FFMPEG_URL:     "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+
+jobs:
+  # ──────────────────────────────────────────────────────────
+  # Build job (Windows — required for WPF + Windows TFM)
+  # ──────────────────────────────────────────────────────────
+  build:
+    name: Build (win-x64)
+    runs-on: windows-latest
+
+    steps:
+      # ── Checkout ──────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0        # full history for version tags
+
+      # ── .NET 9 ────────────────────────────────────────────
+      - name: Setup .NET 9
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      # ── Cache NuGet packages ───────────────────────────────
+      - name: Cache NuGet
+        uses: actions/cache@v4
+        with:
+          path: ~/.nuget/packages
+          key:  nuget-${{ hashFiles('**/*.csproj') }}
+          restore-keys: nuget-
+
+      # ── Restore ───────────────────────────────────────────
+      - name: Restore
+        run: dotnet restore StepsRecorder.sln
+
+      # ── Build (verify it compiles) ─────────────────────────
+      - name: Build
+        run: dotnet build StepsRecorder.sln -c ${{ env.BUILD_CONFIG }} --no-restore
+
+      # ── Test ──────────────────────────────────────────────
+      - name: Test
+        run: >
+          dotnet test src/Tests/Tests.csproj
+          -c ${{ env.BUILD_CONFIG }}
+          --no-build
+          --logger "trx;LogFileName=test-results.trx"
+          --logger "console;verbosity=normal"
+        continue-on-error: false
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: "**/*.trx"
+
+      # ── Download ffmpeg ────────────────────────────────────
+      - name: Download ffmpeg
+        shell: pwsh
+        run: |
+          $zip = "$env:TEMP\ffmpeg.zip"
+          $dir = "$env:TEMP\ffmpeg-extract"
+          Write-Host "Downloading ffmpeg..."
+          Invoke-WebRequest -Uri "${{ env.FFMPEG_URL }}" -OutFile $zip -UseBasicParsing
+          Expand-Archive -Path $zip -DestinationPath $dir -Force
+          $exe = Get-ChildItem $dir -Recurse -Filter ffmpeg.exe |
+                 Where-Object { $_.FullName -like "*\bin\ffmpeg.exe" } |
+                 Select-Object -First 1
+          New-Item -Path tools -ItemType Directory -Force | Out-Null
+          Copy-Item $exe.FullName tools\ffmpeg.exe
+          Write-Host "ffmpeg.exe copied to tools\"
+
+      # ── Publish self-contained single-file EXE ─────────────
+      - name: Publish
+        shell: pwsh
+        run: |
+          dotnet publish src/App/App.csproj `
+            -c ${{ env.BUILD_CONFIG }} `
+            -r win-x64 `
+            --self-contained true `
+            -p:PublishSingleFile=true `
+            -p:EnableCompressionInSingleFile=true `
+            -p:DebugType=embedded `
+            -o dist
+
+          Copy-Item tools\ffmpeg.exe         dist\ffmpeg.exe
+          Copy-Item settings.template.json   dist\settings.template.json
+          Write-Host "dist\ contents:"
+          Get-ChildItem dist | ForEach-Object {
+            $mb = "{0:N1} MB" -f ($_.Length / 1MB)
+            Write-Host "  $($_.Name)  $mb"
+          }
+
+      # ── Create portable zip ────────────────────────────────
+      - name: Create zip
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath StepsRecorder-portable-win-x64.zip
+          $size = "{0:N1} MB" -f ((Get-Item StepsRecorder-portable-win-x64.zip).Length / 1MB)
+          Write-Host "Zip: StepsRecorder-portable-win-x64.zip ($size)"
+
+      # ── Upload build artifact ──────────────────────────────
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StepsRecorder-portable-win-x64
+          path: StepsRecorder-portable-win-x64.zip
+          retention-days: 30
+
+      # ── GitHub Release (on tag push or manual trigger) ─────
+      - name: Create GitHub Release
+        if: |
+          startsWith(github.ref, 'refs/tags/v') ||
+          (github.event_name == 'workflow_dispatch' && github.event.inputs.create_release == 'true')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name:   ${{ github.ref_name }}
+          name:       "StepsRecorder ${{ github.ref_name }}"
+          draft:      false
+          prerelease: ${{ contains(github.ref_name, '-') }}
+          files:      StepsRecorder-portable-win-x64.zip
+          body: |
+            ## StepsRecorder ${{ github.ref_name }}
+
+            Portable Windows application — no installer, no admin rights required.
+
+            ### Download
+            → **[StepsRecorder-portable-win-x64.zip](../../releases/latest)** — extract anywhere and run
+
+            ### Contents
+            | File | Description |
+            |------|-------------|
+            | `StepsRecorder.exe` | Self-contained app (no .NET install needed) |
+            | `ffmpeg.exe` | Video encoder |
+            | `settings.template.json` | Copy to `settings.json` to customize |
+
+            ### Quick Start
+            1. Extract the zip to any folder (local drive or USB)
+            2. Run `StepsRecorder.exe` — tray icon appears
+            3. Press **F9** to start recording
+            4. Press **F9** again to stop — output folder opens automatically
+
+            ### Hotkeys
+            | Key | Action |
+            |-----|--------|
+            | **F9** | Start / Stop session |
+            | **F10** | Pause / Resume step capture |
+
+            ### System Requirements
+            - Windows 10 1803+ or Windows 11
+            - DirectX 11 GPU (for screen recording)
+            - ~200 MB free disk space
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
